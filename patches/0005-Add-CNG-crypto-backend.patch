@@ -7,20 +7,19 @@ Subject: [PATCH] Add CNG crypto backend
  src/cmd/api/boring_test.go                    |   2 +-
  src/cmd/go/go_boring_test.go                  |   2 +-
  src/crypto/boring/boring.go                   |   2 +-
- src/crypto/ecdsa/badlinkname.go               |  17 ++
+ src/crypto/ecdsa/badlinkname.go               |  17 +
  src/crypto/ecdsa/boring.go                    |   2 +-
  src/crypto/ecdsa/notboring.go                 |   2 +-
  src/crypto/internal/backend/backend_test.go   |   4 +-
  src/crypto/internal/backend/bbig/big.go       |   2 +-
  src/crypto/internal/backend/bbig/big_cng.go   |  12 +
- src/crypto/internal/backend/cng_windows.go    | 280 ++++++++++++++++++
- src/crypto/internal/backend/common.go         |  13 +-
+ src/crypto/internal/backend/cng_windows.go    | 300 ++++++++++++++++++
+ src/crypto/internal/backend/common.go         |   7 +-
  src/crypto/internal/boring/fipstls/stub.s     |   2 +-
  src/crypto/internal/boring/fipstls/tls.go     |   2 +-
  src/crypto/rsa/boring.go                      |   2 +-
  src/crypto/rsa/boring_test.go                 |   2 +-
  src/crypto/rsa/notboring.go                   |   2 +-
- src/crypto/rsa/pss.go                         |   2 +-
  src/crypto/rsa/pss_test.go                    |   2 +-
  src/crypto/tls/boring.go                      |   2 +-
  src/crypto/tls/boring_test.go                 |   2 +-
@@ -39,7 +38,7 @@ Subject: [PATCH] Add CNG crypto backend
  .../goexperiment/exp_cngcrypto_off.go         |   9 +
  src/internal/goexperiment/exp_cngcrypto_on.go |   9 +
  src/internal/goexperiment/flags.go            |   1 +
- 35 files changed, 377 insertions(+), 25 deletions(-)
+ 34 files changed, 390 insertions(+), 24 deletions(-)
  create mode 100644 src/crypto/ecdsa/badlinkname.go
  create mode 100644 src/crypto/internal/backend/bbig/big_cng.go
  create mode 100644 src/crypto/internal/backend/cng_windows.go
@@ -182,10 +181,10 @@ index 00000000000000..92623031fd87d0
 +var Dec = bbig.Dec
 diff --git a/src/crypto/internal/backend/cng_windows.go b/src/crypto/internal/backend/cng_windows.go
 new file mode 100644
-index 00000000000000..3d3d13709de5ac
+index 00000000000000..53753b29b244be
 --- /dev/null
 +++ b/src/crypto/internal/backend/cng_windows.go
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,300 @@
 +// Copyright 2017 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -466,11 +465,39 @@ index 00000000000000..3d3d13709de5ac
 +func VerifyEd25519(pub *PublicKeyEd25519, message, sig []byte) error {
 +	panic("cryptobackend: not available")
 +}
++
++func supportsRSAPrimes(primes int) bool {
++	return primes == 2
++}
++
++func supportsPKCS1v15Hash(h crypto.Hash) bool {
++	if h == 0 {
++		// CNG does not support unpadded PKCS1v15 signatures.
++		return false
++	}
++	return supportsRSAHash(h)
++}
++
++func supportsRSAHash(h crypto.Hash) bool {
++	return SupportsHash(h)
++}
++
++func supportsSalt(salt int) bool {
++	return salt != 0 // rsa.PSSSaltLengthAuto
++}
 diff --git a/src/crypto/internal/backend/common.go b/src/crypto/internal/backend/common.go
-index bc595e91024f11..7766d674f5cfaf 100644
+index 183aedbf668e83..1943cbd46ea4da 100644
 --- a/src/crypto/internal/backend/common.go
 +++ b/src/crypto/internal/backend/common.go
-@@ -68,7 +68,11 @@ func hasSuffix(s, t string) bool {
+@@ -7,6 +7,7 @@ package backend
+ import (
+ 	"crypto"
+ 	"crypto/internal/boring/sig"
++	"internal/goexperiment"
+ 	"runtime"
+ 	"syscall"
+ )
+@@ -68,7 +69,11 @@ func hasSuffix(s, t string) bool {
  // UnreachableExceptTests marks code that should be unreachable
  // when backend is in use. It panics.
  func UnreachableExceptTests() {
@@ -483,17 +510,6 @@ index bc595e91024f11..7766d674f5cfaf 100644
  		name := runtime_arg0()
  		// If ran on Windows we'd need to allow _test.exe and .test.exe as well.
  		if !hasSuffix(name, "_test") && !hasSuffix(name, ".test") {
-@@ -90,3 +94,10 @@ func IsRSAKeySupported(primes int) bool {
- 	// Given the above reasons, we only support 2-prime RSA keys.
- 	return primes == 2
- }
-+
-+func IsSaltSupported(salt int) bool {
-+	if goexperiment.CNGCrypto {
-+		return salt != 0 // rsa.PSSSaltLengthAuto
-+	}
-+	return true
-+}
 diff --git a/src/crypto/internal/boring/fipstls/stub.s b/src/crypto/internal/boring/fipstls/stub.s
 index 1dc7116efdff2e..b4c321d1d2babb 100644
 --- a/src/crypto/internal/boring/fipstls/stub.s
@@ -559,19 +575,6 @@ index 933ac569e034a8..0f152b210fdd84 100644
  
  package rsa
  
-diff --git a/src/crypto/rsa/pss.go b/src/crypto/rsa/pss.go
-index 4aac87d7952081..010ee1467501c3 100644
---- a/src/crypto/rsa/pss.go
-+++ b/src/crypto/rsa/pss.go
-@@ -342,7 +342,7 @@ func SignPSS(rand io.Reader, priv *PrivateKey, hash crypto.Hash, digest []byte,
- // The inputs are not considered confidential, and may leak through timing side
- // channels, or if an attacker has control of part of the inputs.
- func VerifyPSS(pub *PublicKey, hash crypto.Hash, digest []byte, sig []byte, opts *PSSOptions) error {
--	if boring.Enabled && boring.SupportsHash(hash) {
-+	if boring.Enabled && boring.IsSaltSupported(opts.saltLength()) && boring.SupportsHash(hash) {
- 		bkey, err := boringPublicKey(pub)
- 		if err != nil {
- 			return err
 diff --git a/src/crypto/rsa/pss_test.go b/src/crypto/rsa/pss_test.go
 index 637d07e18cff2e..21435b86b52dad 100644
 --- a/src/crypto/rsa/pss_test.go
