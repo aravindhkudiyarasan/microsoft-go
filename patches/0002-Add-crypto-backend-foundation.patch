@@ -21,9 +21,9 @@ Subject: [PATCH] Add crypto backend foundation
  src/crypto/hmac/hmac_test.go                 |   2 +-
  src/crypto/internal/backend/backend_test.go  |  30 +++
  src/crypto/internal/backend/bbig/big.go      |  17 ++
- src/crypto/internal/backend/common.go        |  92 +++++++++
+ src/crypto/internal/backend/common.go        |  99 +++++++++
  src/crypto/internal/backend/isrequirefips.go |   9 +
- src/crypto/internal/backend/nobackend.go     | 193 +++++++++++++++++++
+ src/crypto/internal/backend/nobackend.go     | 201 +++++++++++++++++++
  src/crypto/internal/backend/norequirefips.go |   9 +
  src/crypto/internal/backend/stub.s           |  10 +
  src/crypto/md5/md5.go                        |   7 +
@@ -51,7 +51,7 @@ Subject: [PATCH] Add crypto backend foundation
  src/crypto/tls/handshake_server.go           |  25 ++-
  src/crypto/tls/handshake_server_tls13.go     |  10 +
  src/crypto/tls/key_schedule.go               |  18 +-
- src/crypto/tls/prf.go                        |  77 +++++---
+ src/crypto/tls/prf.go                        |  77 ++++---
  src/crypto/tls/prf_test.go                   |  12 +-
  src/crypto/x509/boring_test.go               |   5 +
  src/go/build/deps_test.go                    |   4 +
@@ -60,7 +60,7 @@ Subject: [PATCH] Add crypto backend foundation
  src/hash/notboring_test.go                   |   5 +
  src/net/smtp/smtp_test.go                    |  72 ++++---
  src/runtime/runtime_boring.go                |   5 +
- 56 files changed, 893 insertions(+), 106 deletions(-)
+ 56 files changed, 908 insertions(+), 106 deletions(-)
  create mode 100644 src/crypto/ed25519/boring.go
  create mode 100644 src/crypto/ed25519/notboring.go
  create mode 100644 src/crypto/internal/backend/backend_test.go
@@ -544,10 +544,10 @@ index 00000000000000..85bd3ed083f5b2
 +}
 diff --git a/src/crypto/internal/backend/common.go b/src/crypto/internal/backend/common.go
 new file mode 100644
-index 00000000000000..bc595e91024f11
+index 00000000000000..183aedbf668e83
 --- /dev/null
 +++ b/src/crypto/internal/backend/common.go
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,99 @@
 +// Copyright 2022 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -555,8 +555,8 @@ index 00000000000000..bc595e91024f11
 +package backend
 +
 +import (
++	"crypto"
 +	"crypto/internal/boring/sig"
-+	"internal/goexperiment"
 +	"runtime"
 +	"syscall"
 +)
@@ -628,17 +628,24 @@ index 00000000000000..bc595e91024f11
 +	}
 +}
 +
-+func IsRSAKeySupported(primes int) bool {
-+	if goexperiment.BoringCrypto {
-+		return true
-+	}
-+	// CNG only supports 2-prime RSA keys.
-+	// The built-in OpenSSL 3 providers and OpenSSL 1 do support n-prime RSA keys,
-+	// but the SymCrypt provider for OpenSSL only supports 2-prime RSA keys.
-+	// Only 2-prime RSA keys are FIPS compliant, other n having compatibility
-+	// and security issues. Even crypto/rsa deprecated rsa.GenerateMultiPrimeKey as of Go 1.21.
-+	// Given the above reasons, we only support 2-prime RSA keys.
-+	return primes == 2
++// SupportsRSAPrimes reports whether the number of primes is supported for RSA keys.
++func SupportsRSAPrimes(primes int) bool {
++	return supportsRSAPrimes(primes)
++}
++
++// SupportsPKCS1v15Hash reports whether the hash function is supported for use in PKCS#1 v1.5 signatures.
++func SupportsPKCS1v15Hash(h crypto.Hash) bool {
++	return supportsPKCS1v15Hash(h)
++}
++
++// SupportsRSAHash reports whether the hash function is supported for use in RSA signatures and encryption.
++func SupportsRSAHash(h crypto.Hash) bool {
++	return supportsRSAHash(h)
++}
++
++// SupportsSalt reports whether the salt length is supported.
++func SupportsSalt(salt int) bool {
++	return supportsSalt(salt)
 +}
 diff --git a/src/crypto/internal/backend/isrequirefips.go b/src/crypto/internal/backend/isrequirefips.go
 new file mode 100644
@@ -657,10 +664,10 @@ index 00000000000000..e5d7570d6d4363
 +const isRequireFIPS = true
 diff --git a/src/crypto/internal/backend/nobackend.go b/src/crypto/internal/backend/nobackend.go
 new file mode 100644
-index 00000000000000..08600a2c833ac7
+index 00000000000000..75b60e6d4bf70c
 --- /dev/null
 +++ b/src/crypto/internal/backend/nobackend.go
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,201 @@
 +// Copyright 2017 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -706,8 +713,8 @@ index 00000000000000..08600a2c833ac7
 +
 +func NewHMAC(h func() hash.Hash, key []byte) hash.Hash { panic("cryptobackend: not available") }
 +
-+func NewAESCipher(key []byte) (cipher.Block, error) { panic("cryptobackend: not available") }
-+func NewGCMTLS(c cipher.Block) (cipher.AEAD, error) { panic("cryptobackend: not available") }
++func NewAESCipher(key []byte) (cipher.Block, error)   { panic("cryptobackend: not available") }
++func NewGCMTLS(c cipher.Block) (cipher.AEAD, error)   { panic("cryptobackend: not available") }
 +func NewGCMTLS13(c cipher.Block) (cipher.AEAD, error) { panic("cryptobackend: not available") }
 +
 +type PublicKeyECDSA struct{ _ int }
@@ -854,6 +861,14 @@ index 00000000000000..08600a2c833ac7
 +func VerifyEd25519(pub *PublicKeyEd25519, message, sig []byte) error {
 +	panic("cryptobackend: not available")
 +}
++
++func supportsRSAPrimes(primes int) bool { return false }
++
++func supportsPKCS1v15Hash(h crypto.Hash) bool { return false }
++
++func supportsRSAHash(h crypto.Hash) bool { return false }
++
++func supportsSalt(salt int) bool { return true }
 diff --git a/src/crypto/internal/backend/norequirefips.go b/src/crypto/internal/backend/norequirefips.go
 new file mode 100644
 index 00000000000000..26bfb5f6a643f3
@@ -1088,7 +1103,7 @@ index 2abc0436405f8a..34c22c8fbba7da 100644
  func boringPublicKey(*PublicKey) (*boring.PublicKeyRSA, error) {
  	panic("boringcrypto: not available")
 diff --git a/src/crypto/rsa/pkcs1v15.go b/src/crypto/rsa/pkcs1v15.go
-index 2f958022f98584..790d9cef5d3563 100644
+index 2f958022f98584..b5e9bb2b1f50d2 100644
 --- a/src/crypto/rsa/pkcs1v15.go
 +++ b/src/crypto/rsa/pkcs1v15.go
 @@ -7,7 +7,7 @@ package rsa
@@ -1105,7 +1120,7 @@ index 2f958022f98584..790d9cef5d3563 100644
  	}
  
 -	if boring.Enabled {
-+	if boring.Enabled && boring.IsRSAKeySupported(len(priv.Primes)) {
++	if boring.Enabled && boring.SupportsRSAPrimes(len(priv.Primes)) {
  		bkey, err := boringPrivateKey(priv)
  		if err != nil {
  			return nil, err
@@ -1114,7 +1129,7 @@ index 2f958022f98584..790d9cef5d3563 100644
  	}
  
 -	if boring.Enabled {
-+	if boring.Enabled && boring.IsRSAKeySupported(len(priv.Primes)) {
++	if boring.Enabled && boring.SupportsRSAPrimes(len(priv.Primes)) {
  		var bkey *boring.PrivateKeyRSA
  		bkey, err = boringPrivateKey(priv)
  		if err != nil {
@@ -1123,7 +1138,7 @@ index 2f958022f98584..790d9cef5d3563 100644
  	}
  
 -	if boring.Enabled {
-+	if boring.Enabled && boring.IsRSAKeySupported(len(priv.Primes)) && (hash == 0 || boring.SupportsHash(hash)) {
++	if boring.Enabled && boring.SupportsRSAPrimes(len(priv.Primes)) && boring.SupportsPKCS1v15Hash(hash) {
  		bkey, err := boringPrivateKey(priv)
  		if err != nil {
  			return nil, err
@@ -1132,7 +1147,7 @@ index 2f958022f98584..790d9cef5d3563 100644
  // channels, or if an attacker has control of part of the inputs.
  func VerifyPKCS1v15(pub *PublicKey, hash crypto.Hash, hashed []byte, sig []byte) error {
 -	if boring.Enabled {
-+	if boring.Enabled && (hash == 0 || boring.SupportsHash(hash)) {
++	if boring.Enabled && boring.SupportsPKCS1v15Hash(hash) {
  		bkey, err := boringPublicKey(pub)
  		if err != nil {
  			return err
@@ -1160,7 +1175,7 @@ index dfa1eddc886ff3..849dafacf93d0f 100644
  	_, err := DecryptPKCS1v15(nil, rsaPrivateKey, ciphertext)
  	if err == nil {
 diff --git a/src/crypto/rsa/pss.go b/src/crypto/rsa/pss.go
-index 5716c464ca0a33..4aac87d7952081 100644
+index 5716c464ca0a33..c231073e3838cc 100644
 --- a/src/crypto/rsa/pss.go
 +++ b/src/crypto/rsa/pss.go
 @@ -9,7 +9,7 @@ package rsa
@@ -1177,7 +1192,7 @@ index 5716c464ca0a33..4aac87d7952081 100644
  	}
  
 -	if boring.Enabled {
-+	if boring.Enabled && boring.IsRSAKeySupported(len(priv.Primes)) {
++	if boring.Enabled && boring.SupportsRSAPrimes(len(priv.Primes)) {
  		bkey, err := boringPrivateKey(priv)
  		if err != nil {
  			return nil, err
@@ -1186,7 +1201,7 @@ index 5716c464ca0a33..4aac87d7952081 100644
  	}
  
 -	if boring.Enabled && rand == boring.RandReader {
-+	if boring.Enabled && rand == boring.RandReader && boring.IsRSAKeySupported(len(priv.Primes)) && boring.SupportsHash(hash) {
++	if boring.Enabled && rand == boring.RandReader && boring.SupportsRSAPrimes(len(priv.Primes)) && boring.SupportsRSAHash(hash) {
  		bkey, err := boringPrivateKey(priv)
  		if err != nil {
  			return nil, err
@@ -1195,12 +1210,12 @@ index 5716c464ca0a33..4aac87d7952081 100644
  // channels, or if an attacker has control of part of the inputs.
  func VerifyPSS(pub *PublicKey, hash crypto.Hash, digest []byte, sig []byte, opts *PSSOptions) error {
 -	if boring.Enabled {
-+	if boring.Enabled && boring.SupportsHash(hash) {
++	if boring.Enabled && boring.SupportsSalt(opts.saltLength()) && boring.SupportsRSAHash(hash) {
  		bkey, err := boringPublicKey(pub)
  		if err != nil {
  			return err
 diff --git a/src/crypto/rsa/rsa.go b/src/crypto/rsa/rsa.go
-index 4d78d1eaaa6be0..a016c4f8362cf5 100644
+index 4d78d1eaaa6be0..a48e0543000c6c 100644
 --- a/src/crypto/rsa/rsa.go
 +++ b/src/crypto/rsa/rsa.go
 @@ -26,14 +26,15 @@ package rsa
@@ -1254,7 +1269,7 @@ index 4d78d1eaaa6be0..a016c4f8362cf5 100644
  	}
  
 -	if boring.Enabled {
-+	if boring.Enabled && hash == mgfHash && boring.IsRSAKeySupported(len(priv.Primes)) {
++	if boring.Enabled && hash == mgfHash && boring.SupportsRSAPrimes(len(priv.Primes)) {
  		bkey, err := boringPrivateKey(priv)
  		if err != nil {
  			return nil, err
