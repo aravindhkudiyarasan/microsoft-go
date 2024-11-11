@@ -14,7 +14,7 @@ Subject: [PATCH] Add OpenSSL crypto backend
  src/crypto/ecdsa/notboring.go                 |   2 +-
  src/crypto/internal/backend/bbig/big.go       |   2 +-
  .../internal/backend/bbig/big_openssl.go      |  12 +
- src/crypto/internal/backend/openssl_linux.go  | 358 ++++++++++++++++++
+ src/crypto/internal/backend/openssl_linux.go  | 350 ++++++++++++++++++
  src/crypto/internal/boring/fipstls/stub.s     |   2 +-
  src/crypto/internal/boring/fipstls/tls.go     |   2 +-
  src/crypto/rsa/boring.go                      |   2 +-
@@ -40,7 +40,7 @@ Subject: [PATCH] Add OpenSSL crypto backend
  .../goexperiment/exp_opensslcrypto_on.go      |   9 +
  src/internal/goexperiment/flags.go            |   1 +
  src/os/exec/exec_test.go                      |   9 +
- 36 files changed, 443 insertions(+), 25 deletions(-)
+ 36 files changed, 435 insertions(+), 25 deletions(-)
  create mode 100644 src/crypto/internal/backend/bbig/big_openssl.go
  create mode 100644 src/crypto/internal/backend/openssl_linux.go
  create mode 100644 src/internal/goexperiment/exp_opensslcrypto_off.go
@@ -193,10 +193,10 @@ index 00000000000000..e6695dd66b1d02
 +var Dec = bbig.Dec
 diff --git a/src/crypto/internal/backend/openssl_linux.go b/src/crypto/internal/backend/openssl_linux.go
 new file mode 100644
-index 00000000000000..c57d4716a57f51
+index 00000000000000..38eadc5e93e115
 --- /dev/null
 +++ b/src/crypto/internal/backend/openssl_linux.go
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,350 @@
 +// Copyright 2017 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -541,15 +541,7 @@ index 00000000000000..c57d4716a57f51
 +}
 +
 +func supportsRSAHash(h crypto.Hash) bool {
-+	if !SupportsHash(h) {
-+		return false
-+	}
-+	// The SymCrypt provider for OpenSSL only supports digest function provided by SymCrypt itself.
-+	// It can happen that SupportsHash return true for a digest not provided by SymCrypt, but by another provider.
-+	// The RSA operations will fail if that happens.
-+	// To avoid this case we only support digest functions also supported by SymCrypt, which happens to be
-+	// the most common ones.
-+	return h == crypto.SHA1 || h == crypto.SHA256 || h == crypto.SHA384 || h == crypto.SHA512
++	return SupportsHash(h)
 +}
 +
 +func supportsSalt(salt int) bool {
