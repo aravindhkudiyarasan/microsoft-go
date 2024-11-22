@@ -12,7 +12,7 @@ Subject: [PATCH] Add crypto backend foundation
  src/crypto/ecdh/ecdh.go                       |   2 +-
  src/crypto/ecdh/nist.go                       |   2 +-
  src/crypto/ecdsa/boring.go                    |   4 +-
- src/crypto/ecdsa/ecdsa.go                     |   2 +-
+ src/crypto/ecdsa/ecdsa.go                     |   4 +-
  src/crypto/ecdsa/notboring.go                 |   2 +-
  src/crypto/ed25519/boring.go                  |  71 +++++++
  src/crypto/ed25519/ed25519.go                 |  73 +++++++
@@ -60,7 +60,7 @@ Subject: [PATCH] Add crypto backend foundation
  src/hash/notboring_test.go                    |   5 +
  src/net/smtp/smtp_test.go                     |  72 ++++---
  src/runtime/runtime_boring.go                 |   5 +
- 56 files changed, 774 insertions(+), 66 deletions(-)
+ 56 files changed, 775 insertions(+), 67 deletions(-)
  create mode 100644 src/crypto/ed25519/boring.go
  create mode 100644 src/crypto/ed25519/notboring.go
  create mode 100644 src/crypto/internal/backend/backend_test.go
@@ -198,18 +198,20 @@ index 275c60b4de49eb..61e70f981db4eb 100644
  	"math/big"
  )
 diff --git a/src/crypto/ecdsa/ecdsa.go b/src/crypto/ecdsa/ecdsa.go
-index 0ad669795c56b2..cc50efc3965fe5 100644
+index 0ad669795c56b2..f785c096212182 100644
 --- a/src/crypto/ecdsa/ecdsa.go
 +++ b/src/crypto/ecdsa/ecdsa.go
-@@ -18,7 +18,7 @@ import (
+@@ -18,8 +18,8 @@ import (
  	"crypto"
  	"crypto/ecdh"
  	"crypto/elliptic"
 -	"crypto/internal/boring"
+-	"crypto/internal/boring/bbig"
 +	boring "crypto/internal/backend"
- 	"crypto/internal/boring/bbig"
++	"crypto/internal/backend/bbig"
  	"crypto/internal/fips140/ecdsa"
  	"crypto/internal/randutil"
+ 	"crypto/sha512"
 diff --git a/src/crypto/ecdsa/notboring.go b/src/crypto/ecdsa/notboring.go
 index 039bd82ed21f9f..19188518e85e65 100644
 --- a/src/crypto/ecdsa/notboring.go
