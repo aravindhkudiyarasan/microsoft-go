@@ -54,13 +54,13 @@ Subject: [PATCH] Add crypto backend foundation
  src/crypto/tls/internal/fips140tls/fipstls.go |   3 +-
  src/crypto/tls/prf.go                         |  11 +-
  src/crypto/tls/prf_test.go                    |   6 +-
- src/go/build/deps_test.go                     |   4 +
+ src/go/build/deps_test.go                     |   3 +
  src/hash/boring_test.go                       |   5 +
  src/hash/marshal_test.go                      |   5 +
  src/hash/notboring_test.go                    |   5 +
  src/net/smtp/smtp_test.go                     |  72 ++++---
  src/runtime/runtime_boring.go                 |   5 +
- 56 files changed, 775 insertions(+), 67 deletions(-)
+ 56 files changed, 774 insertions(+), 67 deletions(-)
  create mode 100644 src/crypto/ed25519/boring.go
  create mode 100644 src/crypto/ed25519/notboring.go
  create mode 100644 src/crypto/internal/backend/backend_test.go
@@ -1611,20 +1611,18 @@ index 8233985a62bd22..d8bba4df392231 100644
  		serverMACString := hex.EncodeToString(serverMAC)
  		clientKeyString := hex.EncodeToString(clientKey)
 diff --git a/src/go/build/deps_test.go b/src/go/build/deps_test.go
-index 90b1eed00ed01d..611f23816a88aa 100644
+index 90b1eed00ed01d..6d2777ba27ebe5 100644
 --- a/src/go/build/deps_test.go
 +++ b/src/go/build/deps_test.go
-@@ -500,7 +500,9 @@ var depsRules = `
- 	# CRYPTO is core crypto algorithms - no cgo, fmt, net.
+@@ -501,6 +501,7 @@ var depsRules = `
  	FIPS, crypto/internal/fips140only,
  	crypto/internal/boring/sig,
-+	crypto/internal/boring/fipstls,
  	crypto/internal/boring/syso,
 +	encoding/binary,
  	golang.org/x/sys/cpu,
  	hash, embed
  	< crypto
-@@ -511,6 +513,7 @@ var depsRules = `
+@@ -511,6 +512,7 @@ var depsRules = `
  	crypto/cipher,
  	crypto/internal/boring/bcache
  	< crypto/internal/boring
@@ -1632,7 +1630,7 @@ index 90b1eed00ed01d..611f23816a88aa 100644
  	< crypto/boring;
  
  	crypto/boring
-@@ -542,6 +545,7 @@ var depsRules = `
+@@ -542,6 +544,7 @@ var depsRules = `
  	# CRYPTO-MATH is core bignum-based crypto - no cgo, net; fmt now ok.
  	CRYPTO, FMT, math/big
  	< crypto/internal/boring/bbig
