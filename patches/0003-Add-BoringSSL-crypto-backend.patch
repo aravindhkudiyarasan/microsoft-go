@@ -30,7 +30,7 @@ index 00000000000000..0b62cef68546d0
 +var Dec = bbig.Dec
 diff --git a/src/crypto/internal/backend/boring_linux.go b/src/crypto/internal/backend/boring_linux.go
 new file mode 100644
-index 00000000000000..7c5fbeea717618
+index 00000000000000..d25b3228f4254e
 --- /dev/null
 +++ b/src/crypto/internal/backend/boring_linux.go
 @@ -0,0 +1,225 @@
@@ -82,8 +82,8 @@ index 00000000000000..7c5fbeea717618
 +
 +func NewHMAC(h func() hash.Hash, key []byte) hash.Hash { return boring.NewHMAC(h, key) }
 +
-+func NewAESCipher(key []byte) (cipher.Block, error) { return boring.NewAESCipher(key) }
-+func NewGCMTLS(c cipher.Block) (cipher.AEAD, error) { return boring.NewGCMTLS(c) }
++func NewAESCipher(key []byte) (cipher.Block, error)   { return boring.NewAESCipher(key) }
++func NewGCMTLS(c cipher.Block) (cipher.AEAD, error)   { return boring.NewGCMTLS(c) }
 +func NewGCMTLS13(c cipher.Block) (cipher.AEAD, error) { return boring.NewGCMTLS13(c) }
 +
 +type PublicKeyECDSA = boring.PublicKeyECDSA
@@ -195,7 +195,7 @@ index 00000000000000..7c5fbeea717618
 +
 +func SupportsTLS1PRF() bool { return false }
 +
-+func TLS1PRF(result, secret, label, seed []byte, h func() hash.Hash) error {
++func TLS1PRF(h func() hash.Hash, secret []byte, label string, seed []byte, keyLen int) []byte {
 +	panic("cryptobackend: not available")
 +}
 +
