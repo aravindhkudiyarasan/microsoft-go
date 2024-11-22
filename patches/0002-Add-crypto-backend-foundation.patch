@@ -22,10 +22,12 @@ Subject: [PATCH] Add crypto backend foundation
  src/crypto/hmac/hmac_test.go                  |   2 +-
  src/crypto/internal/backend/backend_test.go   |  30 +++
  src/crypto/internal/backend/bbig/big.go       |  17 ++
- src/crypto/internal/backend/common.go         |  98 +++++++++
- src/crypto/internal/backend/isrequirefips.go  |   9 +
+ src/crypto/internal/backend/common.go         |  72 +++++++
+ .../internal/backend/fips140/fips140.go       |  55 +++++
+ .../internal/backend/fips140/isrequirefips.go |   9 +
+ .../internal/backend/fips140/norequirefips.go |   9 +
+ .../internal/backend/fips140/nosystemfips.go  |   9 +
  src/crypto/internal/backend/nobackend.go      | 193 ++++++++++++++++++
- src/crypto/internal/backend/norequirefips.go  |   9 +
  src/crypto/internal/cryptotest/allocations.go |   2 +-
  .../internal/cryptotest/implementations.go    |   2 +-
  src/crypto/md5/md5.go                         |   7 +
@@ -54,21 +56,23 @@ Subject: [PATCH] Add crypto backend foundation
  src/crypto/tls/internal/fips140tls/fipstls.go |   3 +-
  src/crypto/tls/prf.go                         |  11 +-
  src/crypto/tls/prf_test.go                    |   6 +-
- src/go/build/deps_test.go                     |   3 +
+ src/go/build/deps_test.go                     |  10 +-
  src/hash/boring_test.go                       |   5 +
  src/hash/marshal_test.go                      |   5 +
  src/hash/notboring_test.go                    |   5 +
  src/net/smtp/smtp_test.go                     |  72 ++++---
  src/runtime/runtime_boring.go                 |   5 +
- 56 files changed, 774 insertions(+), 67 deletions(-)
+ 58 files changed, 817 insertions(+), 69 deletions(-)
  create mode 100644 src/crypto/ed25519/boring.go
  create mode 100644 src/crypto/ed25519/notboring.go
  create mode 100644 src/crypto/internal/backend/backend_test.go
  create mode 100644 src/crypto/internal/backend/bbig/big.go
  create mode 100644 src/crypto/internal/backend/common.go
- create mode 100644 src/crypto/internal/backend/isrequirefips.go
+ create mode 100644 src/crypto/internal/backend/fips140/fips140.go
+ create mode 100644 src/crypto/internal/backend/fips140/isrequirefips.go
+ create mode 100644 src/crypto/internal/backend/fips140/norequirefips.go
+ create mode 100644 src/crypto/internal/backend/fips140/nosystemfips.go
  create mode 100644 src/crypto/internal/backend/nobackend.go
- create mode 100644 src/crypto/internal/backend/norequirefips.go
  create mode 100644 src/hash/boring_test.go
  create mode 100644 src/hash/notboring_test.go
 
@@ -550,10 +554,10 @@ index 00000000000000..85bd3ed083f5b2
 +}
 diff --git a/src/crypto/internal/backend/common.go b/src/crypto/internal/backend/common.go
 new file mode 100644
-index 00000000000000..5d1c1147767670
+index 00000000000000..2bb24890cea757
 --- /dev/null
 +++ b/src/crypto/internal/backend/common.go
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,72 @@
 +// Copyright 2022 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -561,49 +565,23 @@ index 00000000000000..5d1c1147767670
 +package backend
 +
 +import (
++	"crypto/internal/backend/fips140"
 +	"crypto/internal/boring/sig"
 +	"internal/goexperiment"
 +	"runtime"
-+	"syscall"
 +
 +	_ "unsafe" // for go:linkname
 +)
 +
-+var FIPS bool
-+
 +func init() {
-+	if v, r, ok := envGoFIPS(); ok && v == "1" {
++	if fips140.Enabled() {
 +		if !Enabled {
 +			if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
-+				panic("FIPS mode requested (" + r + ") but no crypto backend is supported on " + runtime.GOOS)
++				panic("FIPS mode requested (" + fips140.Message + ") but no crypto backend is supported on " + runtime.GOOS)
 +			}
-+			panic("FIPS mode requested (" + r + ") but no supported crypto backend is enabled")
++			panic("FIPS mode requested (" + fips140.Message + ") but no supported crypto backend is enabled")
 +		}
 +	}
-+}
-+
-+func envGoFIPS() (value string, reason string, ok bool) {
-+	// TODO: Decide which environment variable to use.
-+	// See https://github.com/microsoft/go/issues/397.
-+	var varName string
-+	if value, ok = syscall.Getenv("GOFIPS"); ok {
-+		varName = "GOFIPS"
-+	} else if value, ok = syscall.Getenv("GOLANG_FIPS"); ok {
-+		varName = "GOLANG_FIPS"
-+	}
-+	if isRequireFIPS {
-+		if ok && value != "1" {
-+			panic("the 'requirefips' build tag is enabled, but it conflicts " +
-+				"with the detected env variable " +
-+				varName + "=" + value +
-+				" which would disable FIPS mode")
-+		}
-+		return "1", "requirefips tag set", true
-+	}
-+	if ok {
-+		return value, "environment variable " + varName + "=1", true
-+	}
-+	return "", "", false
 +}
 +
 +// Unreachable marks code that should be unreachable
@@ -652,11 +630,72 @@ index 00000000000000..5d1c1147767670
 +	// Given the above reasons, we only support 2-prime RSA keys.
 +	return primes == 2
 +}
-diff --git a/src/crypto/internal/backend/isrequirefips.go b/src/crypto/internal/backend/isrequirefips.go
+diff --git a/src/crypto/internal/backend/fips140/fips140.go b/src/crypto/internal/backend/fips140/fips140.go
 new file mode 100644
-index 00000000000000..e5d7570d6d4363
+index 00000000000000..37ce4d048c9c91
 --- /dev/null
-+++ b/src/crypto/internal/backend/isrequirefips.go
++++ b/src/crypto/internal/backend/fips140/fips140.go
+@@ -0,0 +1,55 @@
++// Copyright 2024 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package fips140
++
++import "syscall"
++
++// Enabled reports whether FIPS 140 mode is enabled by using GOFIPS=1, GOLANG_FIPS=1,
++// the 'requirefips' build tag, or any other platform-specific mechanism.
++func Enabled() bool {
++	return enabled
++}
++
++var enabled bool
++
++// Disabled reports whether FIPS 140 mode is disabled by using GOFIPS=0 or GOLANG_FIPS=1.
++func Disabled() bool {
++	return disabled
++}
++
++var disabled bool
++
++// Message is a human-readable message about how [Enabled] was set.
++var Message string
++
++func init() {
++	// TODO: Decide which environment variable to use.
++	// See https://github.com/microsoft/go/issues/397.
++	var value string
++	var ok bool
++	if value, ok = syscall.Getenv("GOFIPS"); ok {
++		Message = "environment variable GOFIPS"
++	} else if value, ok = syscall.Getenv("GOLANG_FIPS"); ok {
++		Message = "environment variable GOLANG_FIPS"
++	} else if systemFIPSMode() {
++		Message = "system FIPS mode"
++		value = "1"
++	}
++	if value == "1" {
++		enabled = true
++	} else if value == "0" {
++		disabled = true
++	}
++	if isRequireFIPS {
++		if disabled {
++			panic("the 'requirefips' build tag is enabled, but it conflicts " +
++				"with the " + Message + "=" + value +
++				" which would disable FIPS mode")
++		}
++		Message = "requirefips tag set"
++		enabled = true
++		return
++	}
++}
+diff --git a/src/crypto/internal/backend/fips140/isrequirefips.go b/src/crypto/internal/backend/fips140/isrequirefips.go
+new file mode 100644
+index 00000000000000..60d6058fa4b695
+--- /dev/null
++++ b/src/crypto/internal/backend/fips140/isrequirefips.go
 @@ -0,0 +1,9 @@
 +// Copyright 2022 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
@@ -664,9 +703,39 @@ index 00000000000000..e5d7570d6d4363
 +
 +//go:build requirefips
 +
-+package backend
++package fips140
 +
 +const isRequireFIPS = true
+diff --git a/src/crypto/internal/backend/fips140/norequirefips.go b/src/crypto/internal/backend/fips140/norequirefips.go
+new file mode 100644
+index 00000000000000..3d18daaffe555a
+--- /dev/null
++++ b/src/crypto/internal/backend/fips140/norequirefips.go
+@@ -0,0 +1,9 @@
++// Copyright 2022 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build !requirefips
++
++package fips140
++
++const isRequireFIPS = false
+diff --git a/src/crypto/internal/backend/fips140/nosystemfips.go b/src/crypto/internal/backend/fips140/nosystemfips.go
+new file mode 100644
+index 00000000000000..9e12c6d5d2239c
+--- /dev/null
++++ b/src/crypto/internal/backend/fips140/nosystemfips.go
+@@ -0,0 +1,9 @@
++// Copyright 2024 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++package fips140
++
++func systemFIPSMode() bool {
++	return false
++}
 diff --git a/src/crypto/internal/backend/nobackend.go b/src/crypto/internal/backend/nobackend.go
 new file mode 100644
 index 00000000000000..bfef222ac8b124
@@ -866,21 +935,6 @@ index 00000000000000..bfef222ac8b124
 +func VerifyEd25519(pub *PublicKeyEd25519, message, sig []byte) error {
 +	panic("cryptobackend: not available")
 +}
-diff --git a/src/crypto/internal/backend/norequirefips.go b/src/crypto/internal/backend/norequirefips.go
-new file mode 100644
-index 00000000000000..26bfb5f6a643f3
---- /dev/null
-+++ b/src/crypto/internal/backend/norequirefips.go
-@@ -0,0 +1,9 @@
-+// Copyright 2022 The Go Authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style
-+// license that can be found in the LICENSE file.
-+
-+//go:build !requirefips
-+
-+package backend
-+
-+const isRequireFIPS = false
 diff --git a/src/crypto/internal/cryptotest/allocations.go b/src/crypto/internal/cryptotest/allocations.go
 index 0194c2f89dc77e..697a20346ed238 100644
 --- a/src/crypto/internal/cryptotest/allocations.go
@@ -1523,14 +1577,14 @@ index 3552d89ba3bc6f..82a9360a5e27b2 100644
  	type binaryMarshaler interface {
  		MarshalBinary() (data []byte, err error)
 diff --git a/src/crypto/tls/internal/fips140tls/fipstls.go b/src/crypto/tls/internal/fips140tls/fipstls.go
-index 24d78d60cf5b64..0a9f3d2a0735ac 100644
+index 24d78d60cf5b64..1eebcc1e168852 100644
 --- a/src/crypto/tls/internal/fips140tls/fipstls.go
 +++ b/src/crypto/tls/internal/fips140tls/fipstls.go
 @@ -6,6 +6,7 @@
  package fips140tls
  
  import (
-+	boring "crypto/internal/backend"
++	fips140boring "crypto/internal/backend/fips140"
  	"crypto/internal/fips140"
  	"sync/atomic"
  )
@@ -1539,7 +1593,7 @@ index 24d78d60cf5b64..0a9f3d2a0735ac 100644
  
  func init() {
 -	if fips140.Enabled {
-+	if fips140.Enabled || boring.FIPS {
++	if fips140.Enabled || fips140boring.Enabled() {
  		Force()
  	}
  }
@@ -1611,10 +1665,21 @@ index 8233985a62bd22..d8bba4df392231 100644
  		serverMACString := hex.EncodeToString(serverMAC)
  		clientKeyString := hex.EncodeToString(clientKey)
 diff --git a/src/go/build/deps_test.go b/src/go/build/deps_test.go
-index 90b1eed00ed01d..6d2777ba27ebe5 100644
+index 90b1eed00ed01d..5f6bdf9d5057f6 100644
 --- a/src/go/build/deps_test.go
 +++ b/src/go/build/deps_test.go
-@@ -501,6 +501,7 @@ var depsRules = `
+@@ -489,7 +489,9 @@ var depsRules = `
+ 
+ 	FIPS < crypto/internal/fips140/check/checktest;
+ 
+-	FIPS, sync/atomic < crypto/tls/internal/fips140tls;
++	syscall < crypto/internal/backend/fips140;
++
++	FIPS, sync/atomic, crypto/internal/backend/fips140 < crypto/tls/internal/fips140tls;
+ 
+ 	FIPS, internal/godebug, hash < crypto/fips140, crypto/internal/fips140only;
+ 
+@@ -501,6 +503,7 @@ var depsRules = `
  	FIPS, crypto/internal/fips140only,
  	crypto/internal/boring/sig,
  	crypto/internal/boring/syso,
@@ -1622,15 +1687,19 @@ index 90b1eed00ed01d..6d2777ba27ebe5 100644
  	golang.org/x/sys/cpu,
  	hash, embed
  	< crypto
-@@ -511,6 +512,7 @@ var depsRules = `
+@@ -509,8 +512,10 @@ var depsRules = `
+ 	< crypto/sha3;
+ 
  	crypto/cipher,
- 	crypto/internal/boring/bcache
+-	crypto/internal/boring/bcache
++	crypto/internal/boring/bcache,
++	crypto/internal/backend/fips140
  	< crypto/internal/boring
 +	< crypto/internal/backend
  	< crypto/boring;
  
  	crypto/boring
-@@ -542,6 +544,7 @@ var depsRules = `
+@@ -542,6 +547,7 @@ var depsRules = `
  	# CRYPTO-MATH is core bignum-based crypto - no cgo, net; fmt now ok.
  	CRYPTO, FMT, math/big
  	< crypto/internal/boring/bbig

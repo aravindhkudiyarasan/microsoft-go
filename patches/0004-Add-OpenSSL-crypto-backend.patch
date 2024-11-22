@@ -14,7 +14,9 @@ Subject: [PATCH] Add OpenSSL crypto backend
  src/crypto/ecdsa/notboring.go                 |   2 +-
  src/crypto/internal/backend/bbig/big.go       |   2 +-
  .../internal/backend/bbig/big_openssl.go      |  12 +
- src/crypto/internal/backend/openssl_linux.go  | 326 ++++++++++++++++++
+ .../internal/backend/fips140/nosystemfips.go  |   2 +
+ .../internal/backend/fips140/openssl.go       |  41 +++
+ src/crypto/internal/backend/openssl_linux.go  | 283 ++++++++++++++++++
  src/crypto/rsa/boring.go                      |   2 +-
  src/crypto/rsa/boring_test.go                 |   2 +-
  src/crypto/rsa/notboring.go                   |   2 +-
@@ -31,8 +33,9 @@ Subject: [PATCH] Add OpenSSL crypto backend
  .../goexperiment/exp_opensslcrypto_on.go      |   9 +
  src/internal/goexperiment/flags.go            |   1 +
  src/os/exec/exec_test.go                      |   9 +
- 27 files changed, 402 insertions(+), 17 deletions(-)
+ 29 files changed, 402 insertions(+), 17 deletions(-)
  create mode 100644 src/crypto/internal/backend/bbig/big_openssl.go
+ create mode 100644 src/crypto/internal/backend/fips140/openssl.go
  create mode 100644 src/crypto/internal/backend/openssl_linux.go
  create mode 100644 src/internal/goexperiment/exp_opensslcrypto_off.go
  create mode 100644 src/internal/goexperiment/exp_opensslcrypto_on.go
@@ -182,12 +185,72 @@ index 00000000000000..e6695dd66b1d02
 +
 +var Enc = bbig.Enc
 +var Dec = bbig.Dec
+diff --git a/src/crypto/internal/backend/fips140/nosystemfips.go b/src/crypto/internal/backend/fips140/nosystemfips.go
+index 9e12c6d5d2239c..06b08be3ce5106 100644
+--- a/src/crypto/internal/backend/fips140/nosystemfips.go
++++ b/src/crypto/internal/backend/fips140/nosystemfips.go
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
++//go:build !goexperiment.opensslcrypto
++
+ package fips140
+ 
+ func systemFIPSMode() bool {
+diff --git a/src/crypto/internal/backend/fips140/openssl.go b/src/crypto/internal/backend/fips140/openssl.go
+new file mode 100644
+index 00000000000000..118efa3a492a7d
+--- /dev/null
++++ b/src/crypto/internal/backend/fips140/openssl.go
+@@ -0,0 +1,41 @@
++// Copyright 2024 The Go Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build goexperiment.opensslcrypto
++
++package fips140
++
++import "syscall"
++
++func systemFIPSMode() bool {
++	var fd int
++	for {
++		var err error
++		fd, err = syscall.Open("/proc/sys/crypto/fips_enabled", syscall.O_RDONLY, 0)
++		if err == nil {
++			break
++		}
++		switch err {
++		case syscall.EINTR:
++			continue
++		case syscall.ENOENT:
++			return false
++		default:
++			// If there is an error reading we could either panic or assume FIPS is not enabled.
++			// Panicking would be too disruptive for apps that don't require FIPS.
++			// If an app wants to be 100% sure that is running in FIPS mode
++			// it should use boring.Enabled() or GOFIPS=1.
++			return false
++		}
++	}
++	defer syscall.Close(fd)
++	var tmp [1]byte
++	n, err := syscall.Read(fd, tmp[:])
++	if n != 1 || err != nil {
++		// We return false instead of panicing for the same reason as before.
++		return false
++	}
++	// fips_enabled can be either '0' or '1'.
++	return tmp[0] == '1'
++}
 diff --git a/src/crypto/internal/backend/openssl_linux.go b/src/crypto/internal/backend/openssl_linux.go
 new file mode 100644
-index 00000000000000..f5ebca9c419a09
+index 00000000000000..6d273d34923cec
 --- /dev/null
 +++ b/src/crypto/internal/backend/openssl_linux.go
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,283 @@
 +// Copyright 2017 The Go Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style
 +// license that can be found in the LICENSE file.
@@ -202,6 +265,7 @@ index 00000000000000..f5ebca9c419a09
 +import (
 +	"crypto"
 +	"crypto/cipher"
++	"crypto/internal/backend/fips140"
 +	"crypto/internal/boring/sig"
 +	"hash"
 +	"io"
@@ -251,64 +315,20 @@ index 00000000000000..f5ebca9c419a09
 +	if err := openssl.Init(lcrypto); err != nil {
 +		panic("opensslcrypto: can't initialize OpenSSL " + lcrypto + ": " + err.Error())
 +	}
-+	// 0: FIPS opt-out: abort the process if it is enabled and can't be disabled.
-+	// 1: FIPS required: abort the process if it is not enabled and can't be enabled.
-+	// other values: do not override OpenSSL configured FIPS mode.
-+	var fips string
-+	if v, _, ok := envGoFIPS(); ok {
-+		fips = v
-+	} else if systemFIPSMode() {
-+		// System configuration can only force FIPS mode.
-+		fips = "1"
-+	}
-+	switch fips {
-+	case "0":
-+		if openssl.FIPS() {
-+			if err := openssl.SetFIPS(false); err != nil {
-+				panic("opensslcrypto: can't disable FIPS mode for " + openssl.VersionText() + ": " + err.Error())
-+			}
-+		}
-+	case "1":
++	if fips140.Enabled() {
 +		if !openssl.FIPS() {
 +			if err := openssl.SetFIPS(true); err != nil {
 +				panic("opensslcrypto: can't enable FIPS mode for " + openssl.VersionText() + ": " + err.Error())
 +			}
 +		}
++	} else if fips140.Disabled() {
++		if openssl.FIPS() {
++			if err := openssl.SetFIPS(false); err != nil {
++				panic("opensslcrypto: can't disable FIPS mode for " + openssl.VersionText() + ": " + err.Error())
++			}
++		}
 +	}
-+	FIPS = openssl.FIPS()
 +	sig.BoringCrypto()
-+}
-+
-+func systemFIPSMode() bool {
-+	var fd int
-+	for {
-+		var err error
-+		fd, err = syscall.Open("/proc/sys/crypto/fips_enabled", syscall.O_RDONLY, 0)
-+		if err == nil {
-+			break
-+		}
-+		switch err {
-+		case syscall.EINTR:
-+			continue
-+		case syscall.ENOENT:
-+			return false
-+		default:
-+			// If there is an error reading we could either panic or assume FIPS is not enabled.
-+			// Panicking would be too disruptive for apps that don't require FIPS.
-+			// If an app wants to be 100% sure that is running in FIPS mode
-+			// it should use boring.Enabled() or GOFIPS=1.
-+			return false
-+		}
-+	}
-+	defer syscall.Close(fd)
-+	var tmp [1]byte
-+	n, err := syscall.Read(fd, tmp[:])
-+	if n != 1 || err != nil {
-+		// We return false instead of panicing for the same reason as before.
-+		return false
-+	}
-+	// fips_enabled can be either '0' or '1'.
-+	return tmp[0] == '1'
 +}
 +
 +const RandReader = openssl.RandReader
@@ -616,19 +636,19 @@ index 9d72b7d6542c13..fd9696fcb03d3b 100644
  golang.org/x/crypto v0.29.0/go.mod h1:+F4F4N5hv6v38hfeYwTdx20oUvLLc+QfrE9Ax9HtgRg=
  golang.org/x/net v0.31.0 h1:68CPQngjLL0r2AlUKiSxtQFKvzRVbnzLwMUn5SzcLHo=
 diff --git a/src/go/build/deps_test.go b/src/go/build/deps_test.go
-index 611f23816a88aa..52f1dc966dcd65 100644
+index 364e26a752540a..f9f0beca1a70f5 100644
 --- a/src/go/build/deps_test.go
 +++ b/src/go/build/deps_test.go
-@@ -512,6 +512,8 @@ var depsRules = `
- 
+@@ -514,6 +514,8 @@ var depsRules = `
  	crypto/cipher,
- 	crypto/internal/boring/bcache
+ 	crypto/internal/boring/bcache,
+ 	crypto/internal/backend/fips140
 +	< github.com/golang-fips/openssl/v2/internal/subtle
 +	< github.com/golang-fips/openssl/v2
  	< crypto/internal/boring
  	< crypto/internal/backend
  	< crypto/boring;
-@@ -544,6 +546,7 @@ var depsRules = `
+@@ -546,6 +548,7 @@ var depsRules = `
  
  	# CRYPTO-MATH is core bignum-based crypto - no cgo, net; fmt now ok.
  	CRYPTO, FMT, math/big
@@ -636,7 +656,7 @@ index 611f23816a88aa..52f1dc966dcd65 100644
  	< crypto/internal/boring/bbig
  	< crypto/internal/backend/bbig
  	< crypto/rand
-@@ -843,7 +846,7 @@ var buildIgnore = []byte("\n//go:build ignore")
+@@ -845,7 +848,7 @@ var buildIgnore = []byte("\n//go:build ignore")
  
  func findImports(pkg string) ([]string, error) {
  	vpkg := pkg
@@ -645,7 +665,7 @@ index 611f23816a88aa..52f1dc966dcd65 100644
  		vpkg = "vendor/" + pkg
  	}
  	dir := filepath.Join(Default.GOROOT, "src", vpkg)
-@@ -853,7 +856,7 @@ func findImports(pkg string) ([]string, error) {
+@@ -855,7 +858,7 @@ func findImports(pkg string) ([]string, error) {
  	}
  	var imports []string
  	var haveImport = map[string]bool{}
