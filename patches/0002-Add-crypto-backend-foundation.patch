@@ -37,7 +37,7 @@ Subject: [PATCH] Add crypto backend foundation
  src/crypto/rand/rand.go                       |   2 +-
  src/crypto/rc4/rc4.go                         |  18 ++
  src/crypto/rsa/boring.go                      |   4 +-
- src/crypto/rsa/fips.go                        |   2 +-
+ src/crypto/rsa/fips.go                        |   8 +-
  src/crypto/rsa/notboring.go                   |   2 +-
  src/crypto/rsa/pkcs1v15.go                    |   6 +-
  src/crypto/rsa/pkcs1v15_test.go               |   5 +
@@ -62,7 +62,7 @@ Subject: [PATCH] Add crypto backend foundation
  src/hash/notboring_test.go                    |   5 +
  src/net/smtp/smtp_test.go                     |  72 ++++---
  src/runtime/runtime_boring.go                 |   5 +
- 58 files changed, 817 insertions(+), 69 deletions(-)
+ 58 files changed, 820 insertions(+), 72 deletions(-)
  create mode 100644 src/crypto/ed25519/boring.go
  create mode 100644 src/crypto/ed25519/notboring.go
  create mode 100644 src/crypto/internal/backend/backend_test.go
@@ -1151,7 +1151,7 @@ index b9f9d3154f2589..ecb43aaf264743 100644
  	"math/big"
  )
 diff --git a/src/crypto/rsa/fips.go b/src/crypto/rsa/fips.go
-index eac4c44066db5d..3f724f412e7979 100644
+index eac4c44066db5d..0c9ff2810fcf16 100644
 --- a/src/crypto/rsa/fips.go
 +++ b/src/crypto/rsa/fips.go
 @@ -6,7 +6,7 @@ package rsa
@@ -1163,6 +1163,33 @@ index eac4c44066db5d..3f724f412e7979 100644
  	"crypto/internal/fips140/rsa"
  	"crypto/internal/fips140only"
  	"errors"
+@@ -72,7 +72,7 @@ func SignPSS(rand io.Reader, priv *PrivateKey, hash crypto.Hash, digest []byte,
+ 		hash = opts.Hash
+ 	}
+ 
+-	if boring.Enabled && rand == boring.RandReader {
++	if boring.Enabled && rand == boring.RandReader && boring.IsRSAKeySupported(len(priv.Primes)) {
+ 		bkey, err := boringPrivateKey(priv)
+ 		if err != nil {
+ 			return nil, err
+@@ -240,7 +240,7 @@ func decryptOAEP(hash, mgfHash hash.Hash, priv *PrivateKey, ciphertext []byte, l
+ 		}
+ 	}
+ 
+-	if boring.Enabled {
++	if boring.Enabled && boring.IsRSAKeySupported(len(priv.Primes)) {
+ 		k := priv.Size()
+ 		if len(ciphertext) > k ||
+ 			k < hash.Size()*2+2 {
+@@ -288,7 +288,7 @@ func SignPKCS1v15(random io.Reader, priv *PrivateKey, hash crypto.Hash, hashed [
+ 		return nil, errors.New("crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")
+ 	}
+ 
+-	if boring.Enabled {
++	if boring.Enabled && boring.IsRSAKeySupported(len(priv.Primes)) {
+ 		bkey, err := boringPrivateKey(priv)
+ 		if err != nil {
+ 			return nil, err
 diff --git a/src/crypto/rsa/notboring.go b/src/crypto/rsa/notboring.go
 index 2abc0436405f8a..34c22c8fbba7da 100644
 --- a/src/crypto/rsa/notboring.go
