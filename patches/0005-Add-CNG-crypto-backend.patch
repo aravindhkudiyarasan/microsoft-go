@@ -17,7 +17,7 @@ Subject: [PATCH] Add CNG crypto backend
  src/crypto/internal/backend/common.go         |  13 +-
  src/crypto/rsa/boring.go                      |   2 +-
  src/crypto/rsa/boring_test.go                 |   2 +-
- src/crypto/rsa/fips.go                        |   7 +-
+ src/crypto/rsa/fips.go                        |   2 +-
  src/crypto/rsa/notboring.go                   |   2 +-
  src/crypto/rsa/pss_test.go                    |   2 +-
  src/crypto/tls/fipsonly/fipsonly.go           |   2 +-
@@ -32,7 +32,7 @@ Subject: [PATCH] Add CNG crypto backend
  .../goexperiment/exp_cngcrypto_off.go         |   9 +
  src/internal/goexperiment/exp_cngcrypto_on.go |   9 +
  src/internal/goexperiment/flags.go            |   1 +
- 28 files changed, 368 insertions(+), 20 deletions(-)
+ 28 files changed, 364 insertions(+), 19 deletions(-)
  create mode 100644 src/crypto/ecdsa/badlinkname.go
  create mode 100644 src/crypto/internal/backend/bbig/big_cng.go
  create mode 100644 src/crypto/internal/backend/cng_windows.go
@@ -511,29 +511,18 @@ index 0094648f065f8d..ad6c64172c8f32 100644
  // Note: Can run these tests against the non-BoringCrypto
  // version of the code by using "CGO_ENABLED=0 go test".
 diff --git a/src/crypto/rsa/fips.go b/src/crypto/rsa/fips.go
-index 3f724f412e7979..ffb446c7d46e2f 100644
+index 3f724f412e7979..8fcd5dfe394752 100644
 --- a/src/crypto/rsa/fips.go
 +++ b/src/crypto/rsa/fips.go
-@@ -72,14 +72,17 @@ func SignPSS(rand io.Reader, priv *PrivateKey, hash crypto.Hash, digest []byte,
- 		hash = opts.Hash
+@@ -130,7 +130,7 @@ func VerifyPSS(pub *PublicKey, hash crypto.Hash, digest []byte, sig []byte, opts
+ 		return errors.New("crypto/rsa: use of hash functions other than SHA-2 or SHA-3 is not allowed in FIPS 140-only mode")
  	}
  
--	if boring.Enabled && rand == boring.RandReader {
-+	saltSupported := boring.IsSaltSupported(opts.saltLength())
-+	if boring.Enabled && rand == boring.RandReader && saltSupported {
- 		bkey, err := boringPrivateKey(priv)
+-	if boring.Enabled {
++	if boring.Enabled && boring.IsSaltSupported(opts.saltLength()) {
+ 		bkey, err := boringPublicKey(pub)
  		if err != nil {
- 			return nil, err
- 		}
- 		return boring.SignRSAPSS(bkey, hash, digest, opts.saltLength())
- 	}
--	boring.UnreachableExceptTests()
-+	if !saltSupported {
-+		boring.UnreachableExceptTests()
-+	}
- 
- 	k, err := fipsPrivateKey(priv)
- 	if err != nil {
+ 			return err
 diff --git a/src/crypto/rsa/notboring.go b/src/crypto/rsa/notboring.go
 index 933ac569e034a8..0f152b210fdd84 100644
 --- a/src/crypto/rsa/notboring.go
@@ -611,7 +600,7 @@ index fd9696fcb03d3b..9b5c0a577053c5 100644
  golang.org/x/crypto v0.29.0/go.mod h1:+F4F4N5hv6v38hfeYwTdx20oUvLLc+QfrE9Ax9HtgRg=
  golang.org/x/net v0.31.0 h1:68CPQngjLL0r2AlUKiSxtQFKvzRVbnzLwMUn5SzcLHo=
 diff --git a/src/go/build/deps_test.go b/src/go/build/deps_test.go
-index f9f0beca1a70f5..b9a96782b50afc 100644
+index 6cd5e8abf1a456..862994e9e04286 100644
 --- a/src/go/build/deps_test.go
 +++ b/src/go/build/deps_test.go
 @@ -514,6 +514,10 @@ var depsRules = `
